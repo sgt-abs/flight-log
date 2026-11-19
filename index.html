@@ -44,6 +44,10 @@
       <label>Flight no. <input name="flightNo" placeholder="e.g. DL123"></label>
       <label>From <input name="from" list="airportList" placeholder="SFO" maxlength="40" required></label>
       <label>To <input name="to" list="airportList" placeholder="JFK" maxlength="40" required></label>
+      <label>Departs (local time) <input type="time" name="depTime"></label>
+      <label>Arrives (local time) <input type="time" name="arrTime"></label>
+      <label>Arrival date <small>(only if different day)</small> <input type="date" name="arrDate"></label>
+      <label>Duration (h:mm) <input name="duration" placeholder="5:30" pattern="\d{1,2}:[0-5]\d"></label>
       <label>Seat <input name="seat" placeholder="23A" maxlength="4"></label>
       <label>Seat type
         <select name="seatType">
@@ -51,8 +55,8 @@
         </select>
       </label>
       <label>Aircraft <input name="aircraft" placeholder="Boeing 737-800"></label>
-      <label>Duration (h:mm, optional) <input name="duration" placeholder="5:30" pattern="\d{1,2}:[0-5]\d"></label>
     </div>
+    <p id="durHint" class="hint"></p>
     <label>Notes <textarea name="notes" rows="2" placeholder="Anything memorable"></textarea></label>
     <p id="formErr" class="err" hidden></p>
     <div class="row">

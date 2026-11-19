@@ -82,4 +82,6 @@ input, select, textarea {
 .spacer { flex: 1; }
 .primary { background: var(--accent) !important; color: var(--accent-text) !important; border-color: var(--accent) !important; font-weight: 700; }
 .danger { color: var(--danger) !important; }
+.hint { color: var(--muted); font-size: 13px; margin: 0 0 8px; min-height: 1em; }
+label small { font-weight: 400; }
 .err { color: var(--danger); font-size: 14px; margin: 8px 0 0; }

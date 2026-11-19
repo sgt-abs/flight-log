@@ -8,8 +8,8 @@
 
   // ---------- reference data ----------
   const airports = {};
-  for (const [iata, name, city, country, lat, lon] of window.AIRPORTS) {
-    airports[iata] = { iata, name, city, country, lat, lon };
+  for (const [iata, name, city, country, lat, lon, tz] of window.AIRPORTS) {
+    airports[iata] = { iata, name, city, country, lat, lon, tz };
   }
   $('#airportList').innerHTML = window.AIRPORTS
     .map(a => `<option value="${a[0]}">${esc(a[2])} – ${esc(a[1])}</option>`).join('');
@@ -236,7 +236,7 @@
   let editingId = null;
   function openForm(id) {
     editingId = id || null;
-    form.reset(); $('#formErr').hidden = true;
+    form.reset(); $('#formErr').hidden = true; $('#durHint').textContent = '';
     $('#dlgTitle').textContent = id ? 'Edit flight' : 'Add flight';
     $('#delBtn').hidden = !id;
     if (id) {
@@ -247,6 +247,38 @@
     }
     dlg.showModal();
   }
+  // UTC ms for a local wall-clock time in an IANA time zone (two passes handle DST shifts)
+  function utcFromLocal(tz, y, mo, d, h, mi) {
+    const fmt = new Intl.DateTimeFormat('en-US', { timeZone: tz, hourCycle: 'h23', year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric' });
+    const offset = t => {
+      const p = Object.fromEntries(fmt.formatToParts(new Date(t)).map(x => [x.type, x.value]));
+      return Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute) - t;
+    };
+    const wall = Date.UTC(y, mo - 1, d, h, mi);
+    return wall - offset(wall - offset(wall));
+  }
+  function autoDuration() {
+    const e = form.elements, hint = $('#durHint');
+    hint.textContent = '';
+    const a = airports[code(e.from.value)], b = airports[code(e.to.value)];
+    if (!e.date.value || !e.depTime.value || !e.arrTime.value || !a || !b) return;
+    if (!a.tz || !b.tz) { hint.textContent = 'No time zone data for these airports; enter the duration manually.'; return; }
+    const [y, m, d] = e.date.value.split('-').map(Number);
+    const [dh, dn] = e.depTime.value.split(':').map(Number);
+    const [ah, an] = e.arrTime.value.split(':').map(Number);
+    const dep = utcFromLocal(a.tz, y, m, d, dh, dn);
+    const [ay, am, ad] = (e.arrDate.value || e.date.value).split('-').map(Number);
+    let mins = (utcFromLocal(b.tz, ay, am, ad, ah, an) - dep) / 60000;
+    if (mins <= 0 && !e.arrDate.value) {
+      mins += 1440;
+      hint.textContent = 'Assumed arrival the next day.';
+    }
+    if (mins <= 0 || mins > 40 * 60) { hint.textContent = 'Check the times and arrival date; the result is not a valid duration.'; return; }
+    e.duration.value = Math.floor(mins / 60) + ':' + String(Math.round(mins % 60)).padStart(2, '0');
+    hint.textContent = (hint.textContent + ' Duration calculated from local times.').trim();
+  }
+  form.addEventListener('input', e => { if (e.target.name !== 'duration') autoDuration(); });
+
   $('#addBtn').addEventListener('click', () => openForm());
   $('#cancelBtn').addEventListener('click', () => dlg.close());
   $('#tab-flights').addEventListener('click', e => {
