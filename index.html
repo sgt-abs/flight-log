@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0b1d33">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Flight Log</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon.svg">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>✈ Flight Log</h1>
+  <nav id="tabs">
+    <button data-tab="flights" class="active">Flights</button>
+    <button data-tab="stats">Stats</button>
+    <button data-tab="map">Summary</button>
+  </nav>
+</header>
+
+<main>
+  <section id="tab-flights"></section>
+  <section id="tab-stats" hidden></section>
+  <section id="tab-map" hidden></section>
+</main>
+
+<button id="addBtn" aria-label="Add flight">+</button>
+
+<dialog id="dlg">
+  <form id="form" method="dialog" autocomplete="off">
+    <h2 id="dlgTitle">Add flight</h2>
+    <div class="grid">
+      <label>Date <input type="date" name="date" required></label>
+      <label>Cabin
+        <select name="cabin">
+          <option>Economy</option><option>Premium Economy</option><option>Business</option><option>First</option>
+        </select>
+      </label>
+      <label>Airline <input name="airline" list="airlineList" placeholder="e.g. Delta Air Lines"></label>
+      <label>Flight no. <input name="flightNo" placeholder="e.g. DL123"></label>
+      <label>From <input name="from" list="airportList" placeholder="SFO" maxlength="40" required></label>
+      <label>To <input name="to" list="airportList" placeholder="JFK" maxlength="40" required></label>
+      <label>Seat <input name="seat" placeholder="23A" maxlength="4"></label>
+      <label>Seat type
+        <select name="seatType">
+          <option value="">—</option><option>Window</option><option>Middle</option><option>Aisle</option>
+        </select>
+      </label>
+      <label>Aircraft <input name="aircraft" placeholder="Boeing 737-800"></label>
+      <label>Duration (h:mm, optional) <input name="duration" placeholder="5:30" pattern="\d{1,2}:[0-5]\d"></label>
+    </div>
+    <label>Notes <textarea name="notes" rows="2" placeholder="Anything memorable"></textarea></label>
+    <p id="formErr" class="err" hidden></p>
+    <div class="row">
+      <button type="button" id="delBtn" class="danger" hidden>Delete</button>
+      <span class="spacer"></span>
+      <button type="button" id="cancelBtn">Cancel</button>
+      <button type="submit" class="primary">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<datalist id="airportList"></datalist>
+<datalist id="airlineList"></datalist>
+
+<script src="data/airports.js"></script>
+<script src="data/airlines.js"></script>
+<script src="data/land.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
