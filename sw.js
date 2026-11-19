@@ -1,5 +1,5 @@
-const CACHE = 'flightlog-v2';
-const FILES = ['./', 'index.html', 'style.css', 'app.js', 'manifest.webmanifest', 'icon.svg',
+const CACHE = 'flightlog-v3';
+const FILES = ['./', 'index.html', 'style.css', 'app.js', 'globe.js','manifest.webmanifest', 'icon.svg',
   'data/airports.js', 'data/airlines.js', 'data/land.js'];
 
 self.addEventListener('install', e => {

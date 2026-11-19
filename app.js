@@ -162,7 +162,7 @@
     segs.push(cur);
     return segs.map(s => 'M' + s.map(p => p[0].toFixed(1) + ' ' + p[1].toFixed(1)).join('L')).join('');
   }
-  let year = 'all';
+  let year = 'all', mapMode = 'globe';
   function renderMap() {
     const years = [...new Set(flights.map(f => f.date.slice(0, 4)))].sort().reverse();
     if (year !== 'all' && !years.includes(year)) year = 'all';
@@ -206,14 +206,29 @@
           </div></div>` +
         (ac ? `<div class="card"><div class="pl">MOST FLOWN AIRCRAFT</div><div class="pv">${esc(ac[0])}</div><div class="ps">${ac[1]} flight${ac[1] > 1 ? 's' : ''}</div></div>` : '');
     }
-    $('#tab-map').innerHTML = (years.length ? `<div class="chips">${chips}</div>` : '') +
-      `<div id="mapWrap"><svg viewBox="0 20 720 280" role="img" aria-label="Map of your flights">
-      <path class="land" d="${land}"/>${arcs.join('')}${dots}</svg></div>` + summary +
+    const modes = ['globe', 'flat'].map(m =>
+      `<button class="chip mode${m === mapMode ? ' on' : ''}" data-mode="${m}">${m === 'globe' ? 'Globe' : 'Flat'}</button>`).join('');
+    const view = mapMode === 'globe'
+      ? '<div id="globeWrap"><canvas id="globe" aria-label="Interactive globe of your flights"></canvas></div>'
+      : `<div id="mapWrap"><svg viewBox="0 20 720 280" role="img" aria-label="Map of your flights">
+      <path class="land" d="${land}"/>${arcs.join('')}${dots}</svg></div>`;
+    $('#tab-map').innerHTML = `<div class="chips">${years.length ? chips : ''}<span class="grow"></span>${modes}</div>` + view + summary +
       (flights.length ? '' : '<div class="empty">Your routes will be drawn here.</div>');
+    if (mapMode === 'globe') {
+      const seen = new Set(), routes = [];
+      for (const f of list) {
+        const a = airports[f.from], b = airports[f.to], k = [f.from, f.to].sort().join('-');
+        if (a && b && !seen.has(k)) { seen.add(k); routes.push([a, b]); }
+      }
+      window.startGlobe($('#globe'), routes, [...ports].map(c => airports[c]));
+    }
   }
   $('#tab-map').addEventListener('click', e => {
     const c = e.target.closest('.chip');
-    if (c) { year = c.dataset.year; renderMap(); }
+    if (!c) return;
+    if (c.dataset.year) year = c.dataset.year;
+    if (c.dataset.mode) mapMode = c.dataset.mode;
+    renderMap();
   });
 
   // ---------- tabs ----------
