@@ -1,6 +1,6 @@
-const CACHE = 'flightlog-v5';
+const CACHE = 'flightlog-v6';
 const FILES = ['./', 'index.html', 'style.css', 'app.js', 'globe.js', 'manifest.webmanifest', 'icon.svg',
-  'data/airports.js', 'data/airlines.js', 'data/land.js'];
+  'data/airports.js', 'data/airlines.js', 'data/land.js', 'data/earth.jpg'];
 
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(FILES)).then(() => self.skipWaiting()));

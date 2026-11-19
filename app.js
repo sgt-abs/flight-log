@@ -210,7 +210,7 @@
     const modes = Object.keys(modeNames).map(m =>
       `<button class="chip mode${m === mapMode ? ' on' : ''}" data-mode="${m}">${modeNames[m]}</button>`).join('');
     const view = mapMode === 'globe'
-      ? '<div id="globeWrap"><canvas id="globe" aria-label="Interactive globe of your flights"></canvas></div>'
+      ? '<div id="globeWrap"><canvas id="globe" aria-label="Interactive globe of your flights"></canvas></div><div class="credit">Earth imagery: NASA Blue Marble</div>'
       : `<div id="mapWrap"><svg viewBox="0 20 720 280" role="img" aria-label="Map of your flights">
       <path class="land" d="${land}"/>${arcs.join('')}${dots}</svg></div>`;
     $('#tab-map').innerHTML = `<div class="chips">${years.length ? chips : ''}<span class="grow"></span>${modes}</div>` + view + summary +

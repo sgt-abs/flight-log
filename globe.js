@@ -5,9 +5,9 @@
   const MAX_LAT = 1.4;
   const ARC = '#ffd24a';
   const G = { lon: 0, lat: 0.35, zoom: 1, sig: null };
-  let run = 0;
+  let run = 0, cleanup = null;
 
-  // land outline as [lon, sin(lat), cos(lat)] so each frame only needs a few multiplications
+  // plain land outline as [lon, sin(lat), cos(lat)]; only used if WebGL is unavailable
   const land = window.LAND.map(poly => poly.map(([lon, lat]) => [lon * RAD, Math.sin(lat * RAD), Math.cos(lat * RAD)]));
 
   const unit = p => [Math.cos(p.lat * RAD) * Math.cos(p.lon * RAD), Math.cos(p.lat * RAD) * Math.sin(p.lon * RAD), Math.sin(p.lat * RAD)];
@@ -30,80 +30,111 @@
     return pts;
   }
 
-  // sub-solar point (where the sun is overhead) for a moment in time, in radians; accurate to about 1 degree
-  function sunPoint(ms) {
-    const n = ms / 86400000 - 10957.5; // days since J2000
-    const L = (280.46 + 0.9856474 * n) % 360;
-    const g = ((357.528 + 0.9856003 * n) % 360) * RAD;
-    const lam = (L + 1.915 * Math.sin(g) + 0.02 * Math.sin(2 * g)) * RAD;
-    const eps = (23.439 - 4e-7 * n) * RAD;
-    const dec = Math.asin(Math.sin(eps) * Math.sin(lam));
-    const ra = Math.atan2(Math.cos(eps) * Math.sin(lam), Math.cos(lam));
-    const gmst = ((280.46061837 + 360.98564736629 * n) % 360) * RAD;
-    return { lon: ra - gmst, lat: dec };
+  // ---------- Earth texture (NASA Blue Marble, equirectangular) ----------
+  const earth = new Image();
+  let earthState = 'idle'; // idle | loading | ready | failed
+  const waiting = [];
+  function whenEarth(fn) {
+    if (earthState === 'ready' || earthState === 'failed') return fn();
+    waiting.push(fn);
+    if (earthState === 'idle') {
+      earthState = 'loading';
+      earth.onload = () => { earthState = 'ready'; waiting.splice(0).forEach(f => f()); };
+      earth.onerror = () => { earthState = 'failed'; waiting.splice(0).forEach(f => f()); };
+      earth.src = 'data/earth.jpg';
+    }
   }
 
-  // ---------- land colouring ----------
-  // No land-cover data is bundled, so colour comes from latitude bands plus a handful of hand-placed regions
-  const COLORS = {
-    desert: [206, 178, 122], steppe: [170, 160, 100], rain: [22, 84, 40],
-    mount: [128, 112, 92], ice: [242, 246, 250],
-  };
-  const STRENGTH = { desert: 1, steppe: 0.5, rain: 1, mount: 0.55, ice: 1 };
-  // [centre lon, centre lat, half-width lon, half-height lat, kind]
-  const REGIONS = [
-    [10, 24, 28, 9, 'desert'], [47, 24, 12, 8, 'desert'], [103, 43, 14, 6, 'desert'], [134, -25, 14, 9, 'desert'],
-    [-111, 33, 9, 6, 'desert'], [20, -24, 9, 7, 'desert'], [62, 40, 10, 6, 'desert'], [71, 27, 5, 4, 'desert'],
-    [58, 31, 8, 5, 'desert'], [-68, -45, 5, 9, 'steppe'], [-100, 42, 12, 6, 'steppe'], [60, 52, 25, 5, 'steppe'],
-    [-62, -4, 14, 9, 'rain'], [22, 0, 10, 7, 'rain'], [108, -1, 14, 7, 'rain'], [102, 17, 7, 8, 'rain'],
-    [88, 32, 14, 5, 'mount'], [-70, -20, 4, 20, 'mount'], [-110, 45, 6, 12, 'mount'],
-    [-40, 73, 22, 12, 'ice'],
-  ];
-  const lerp = (a, b, t) => a + (b - a) * t;
-  const smooth = (a, b, x) => { const t = Math.max(0, Math.min(1, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
-  const hash = (x, y) => { const s = Math.sin(x * 127.1 + y * 311.7) * 43758.5453; return s - Math.floor(s); };
-  function noise(x, y) {
-    const xi = Math.floor(x), yi = Math.floor(y), u = smooth(0, 1, x - xi), v = smooth(0, 1, y - yi);
-    return lerp(lerp(hash(xi, yi), hash(xi + 1, yi), u), lerp(hash(xi, yi + 1), hash(xi + 1, yi + 1), u), v);
-  }
-  // base colour by latitude (degrees, signed)
-  const BANDS = [
-    [0, [40, 110, 52]], [12, [84, 126, 60]], [30, [92, 126, 68]], [45, [66, 100, 58]],
-    [58, [58, 84, 66]], [68, [132, 142, 124]], [76, [240, 244, 248]],
-  ];
-  function bandColor(alat) {
-    for (let i = 1; i < BANDS.length; i++) {
-      if (alat <= BANDS[i][0]) {
-        const t = (alat - BANDS[i - 1][0]) / (BANDS[i][0] - BANDS[i - 1][0]);
-        const a = BANDS[i - 1][1], b = BANDS[i][1];
-        return [lerp(a[0], b[0], t), lerp(a[1], b[1], t), lerp(a[2], b[2], t)];
-      }
+  const VERT = `#version 300 es
+in vec2 p;
+void main() { gl_Position = vec4(p, 0.0, 1.0); }`;
+
+  // Orthographic sphere: for every pixel inside the disc, work out its longitude/latitude and look up the texture.
+  // The mip level is chosen by hand because the longitude wrap-around breaks automatic derivatives.
+  const FRAG = `#version 300 es
+precision highp float;
+uniform sampler2D tex;
+uniform float c, R, lon0, sinL, cosL, texW;
+out vec4 o;
+void main() {
+  float x = (gl_FragCoord.x - c) / R;
+  float y = (gl_FragCoord.y - c) / R;
+  float r2 = x * x + y * y;
+  if (r2 >= 1.0) { o = vec4(0.0); return; }
+  float z = sqrt(1.0 - r2);
+  float sinp = clamp(y * cosL + z * sinL, -1.0, 1.0);
+  float lon = lon0 + atan(x, z * cosL - y * sinL);
+  vec2 uv = vec2(lon / 6.2831853 + 0.5, asin(sinp) / 3.1415927 + 0.5);
+  float cosp = sqrt(1.0 - sinp * sinp);
+  float lod = log2(max(1.0, (texW / 6.2831853) / (R * max(z, 0.1) * max(cosp, 0.1)))) - 0.3;
+  vec3 col = textureLod(tex, uv, max(lod, 0.0)).rgb;
+  float d = dot(vec3(x, y, z), normalize(vec3(-0.4, 0.5, 0.75)));
+  float light = (0.8 + 0.3 * d) * (0.86 + 0.14 * z);
+  col = pow(col, vec3(0.92)) * light * 1.1;
+  o = vec4(min(col, 1.0), 1.0);
+}`;
+
+  function initGL(glCanvas) {
+    const gl = glCanvas.getContext('webgl2', { alpha: true, antialias: false, premultipliedAlpha: true });
+    if (!gl) return null;
+    try {
+      const shader = (type, src) => {
+        const s = gl.createShader(type);
+        gl.shaderSource(s, src); gl.compileShader(s);
+        if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+        return s;
+      };
+      const pr = gl.createProgram();
+      gl.attachShader(pr, shader(gl.VERTEX_SHADER, VERT));
+      gl.attachShader(pr, shader(gl.FRAGMENT_SHADER, FRAG));
+      gl.linkProgram(pr);
+      if (!gl.getProgramParameter(pr, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(pr));
+      gl.useProgram(pr);
+      gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW); // one big triangle
+      const loc = gl.getAttribLocation(pr, 'p');
+      gl.enableVertexAttribArray(loc);
+      gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+      const u = {};
+      for (const n of ['c', 'R', 'lon0', 'sinL', 'cosL', 'texW']) u[n] = gl.getUniformLocation(pr, n);
+      return { gl, u, tex: null };
+    } catch (e) {
+      console.warn('Globe: WebGL setup failed, using the plain outline.', e);
+      return null;
     }
-    return BANDS[BANDS.length - 1][1];
   }
-  const landRGB = [0, 0, 0];
-  function landColor(lonD, latD) {
-    let c = latD < -64 ? COLORS.ice : bandColor(Math.abs(latD));
-    let r = c[0], g = c[1], b = c[2];
-    for (const [lc, la, rx, ry, kind] of REGIONS) {
-      const dl = ((lonD - lc + 540) % 360) - 180, dy = latD - la;
-      // wobble the edge with noise so regions look like patches of terrain rather than ovals
-      const d2 = (dl / rx) * (dl / rx) + (dy / ry) * (dy / ry) + (noise(lonD / 4 + lc, latD / 4 + la) - 0.5) * 0.9;
-      if (d2 >= 1) continue;
-      const w = smooth(0, 0.7, 1 - d2) * STRENGTH[kind], k = COLORS[kind];
-      r = lerp(r, k[0], w); g = lerp(g, k[1], w); b = lerp(b, k[2], w);
-    }
-    const n = 0.86 + 0.28 * (0.65 * noise(lonD / 7, latD / 7) + 0.35 * noise(lonD / 2.5, latD / 2.5));
-    landRGB[0] = r * n; landRGB[1] = g * n; landRGB[2] = b * n;
-    return landRGB;
+
+  function uploadTexture(g) {
+    const gl = g.gl;
+    g.tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, g.tex);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, gl.RGB, gl.UNSIGNED_BYTE, earth);
+    gl.generateMipmap(gl.TEXTURE_2D);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
   }
 
   window.startGlobe = function (canvas, routes, ports) {
     if (!canvas) return;
     const myRun = ++run;
+    if (cleanup) cleanup();
     const ctx = canvas.getContext('2d');
     const dpr = window.devicePixelRatio || 1;
     canvas.width = canvas.height = Math.round(canvas.clientWidth * dpr);
+
+    // the globe surface is drawn by WebGL on a canvas underneath; this 2D canvas on top draws the glow, routes and labels
+    const glCanvas = document.createElement('canvas');
+    glCanvas.width = glCanvas.height = canvas.width;
+    canvas.parentNode.insertBefore(glCanvas, canvas);
+    const g = initGL(glCanvas);
+    cleanup = () => {
+      const ext = g && g.gl.getExtension('WEBGL_lose_context');
+      if (ext) ext.loseContext();
+      glCanvas.remove();
+    };
 
     const sig = ports.map(p => p.iata).sort().join();
     if (G.sig !== sig) {
@@ -116,56 +147,17 @@
       }
     }
 
-    const css = getComputedStyle(document.documentElement);
-    const col = n => css.getPropertyValue(n).trim();
     const arcs = routes.map(([a, b]) => arcPoints(a, b));
     const dots = ports.map(p => ({ code: p.iata, lam: p.lon * RAD, sp: Math.sin(p.lat * RAD), cp: Math.cos(p.lat * RAD) }));
     const reduced = window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-    let auto = !reduced, dirty = true, vx = 0, vy = 0, sunAt = 0;
+    let auto = !reduced, dirty = true, vx = 0, vy = 0;
 
-    // The coloured surface (ocean, land, sun lighting, night side) is computed on a small grid and scaled up,
-    // which keeps it smooth and fast; land edges stay crisp because the land is drawn as a vector clip.
-    const N = 220;
-    const mk = () => { const cv = document.createElement('canvas'); cv.width = cv.height = N; return cv; };
-    const oceanCv = mk(), landCv = mk();
-    const oceanCtx = oceanCv.getContext('2d'), landCtx = landCv.getContext('2d');
-    const oceanImg = oceanCtx.createImageData(N, N), landImg = landCtx.createImageData(N, N);
-
-    function paintSurface(c, R, proj) {
-      const sun = sunPoint(Date.now());
-      const [sx, sy, sz] = proj(sun.lon, Math.sin(sun.lat), Math.cos(sun.lat), 1);
-      const hm = Math.hypot(sx, sy, sz + 1), hx = sx / hm, hy = sy / hm, hz = (sz + 1) / hm; // half-vector for the sun glint
-      const sinL = Math.sin(G.lat), cosL = Math.cos(G.lat);
-      const W = canvas.width, od = oceanImg.data, ld = landImg.data;
-      for (let j = 0; j < N; j++) {
-        const y = (c - (j + 0.5) / N * W) / R;
-        for (let i = 0; i < N; i++) {
-          const x = ((i + 0.5) / N * W - c) / R, r2 = x * x + y * y, o = (j * N + i) * 4;
-          if (r2 >= 1) { od[o + 3] = 0; ld[o + 3] = 0; continue; }
-          const z = Math.sqrt(1 - r2);
-          const latD = Math.asin(Math.max(-1, Math.min(1, y * cosL + z * sinL))) / RAD;
-          const lonD = (G.lon + Math.atan2(x, z * cosL - y * sinL)) / RAD;
-
-          const d = x * sx + y * sy + z * sz;                           // cosine of the sun's angle from overhead
-          const day = smooth(-0.1, 0.25, d);
-          const lit = (0.24 + 0.76 * day * (0.6 + 0.4 * Math.max(d, 0))) * (0.7 + 0.3 * z);
-          const tw = Math.exp(-(((d - 0.03) / 0.08) ** 2)) * 0.5;         // warm glow along the terminator
-          const spec = day > 0 ? Math.pow(Math.max(0, x * hx + y * hy + z * hz), 160) * 0.35 * day : 0;
-
-          const cl = Math.cos(latD * RAD), t = cl * cl;
-          const L = landColor(lonD, latD);
-          ld[o] = L[0] * lit + tw * 70; ld[o + 1] = L[1] * lit + tw * 30; ld[o + 2] = L[2] * lit; ld[o + 3] = 255;
-          od[o] = lerp(10, 18, t) * lit + tw * 50 + spec * 255;
-          od[o + 1] = lerp(38, 72, t) * lit + tw * 22 + spec * 255;
-          od[o + 2] = lerp(86, 132, t) * lit + spec * 255;
-          od[o + 3] = 255;
-        }
-      }
-      oceanCtx.putImageData(oceanImg, 0, 0);
-      landCtx.putImageData(landImg, 0, 0);
-      sunAt = Date.now();
-    }
+    whenEarth(() => {
+      if (myRun !== run) return;
+      if (g && earthState === 'ready') uploadTexture(g);
+      dirty = true;
+    });
 
     function draw() {
       const W = canvas.width, c = W / 2, R = W * 0.46 * G.zoom;
@@ -177,35 +169,39 @@
       ctx.clearRect(0, 0, W, W);
 
       // atmosphere glow
-      const halo = ctx.createRadialGradient(c, c, R * 0.97, c, c, R * 1.13);
-      halo.addColorStop(0, 'rgba(110,170,255,0.5)'); halo.addColorStop(1, 'rgba(110,170,255,0)');
+      const halo = ctx.createRadialGradient(c, c, R * 0.995, c, c, R * 1.12);
+      halo.addColorStop(0, 'rgba(110,170,255,0.4)'); halo.addColorStop(1, 'rgba(110,170,255,0)');
       ctx.fillStyle = halo; ctx.beginPath(); ctx.arc(c, c, R * 1.13, 0, 2 * Math.PI); ctx.fill();
 
-      paintSurface(c, R, proj);
-      ctx.save();
-      ctx.beginPath(); ctx.arc(c, c, R, 0, 2 * Math.PI); ctx.clip();
-      ctx.fillStyle = '#0a2146'; ctx.fillRect(0, 0, W, W); // solid base so the low-res edge pixels never show through
-      ctx.drawImage(oceanCv, 0, 0, W, W);
-
-      // land: one path of every visible polygon (points behind the horizon are pushed onto the rim),
-      // filled with the coloured land layer
-      const path = new Path2D();
-      for (const poly of land) {
-        const ps = poly.map(([lam, sp, cp]) => proj(lam, sp, cp, 1));
-        if (!ps.some(p => p[2] > 0)) continue;
-        ps.forEach(([x, y, z], i) => {
-          if (z < 0) { const m = Math.hypot(x, y) || 1; x /= m; y /= m; }
-          const px = c + R * x, py = c - R * y;
-          i ? path.lineTo(px, py) : path.moveTo(px, py);
-        });
-        path.closePath();
+      if (g) {
+        const gl = g.gl;
+        gl.viewport(0, 0, W, W);
+        gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT);
+        if (g.tex) {
+          gl.uniform1f(g.u.c, c); gl.uniform1f(g.u.R, R);
+          gl.uniform1f(g.u.lon0, G.lon); gl.uniform1f(g.u.sinL, sinL); gl.uniform1f(g.u.cosL, cosL);
+          gl.uniform1f(g.u.texW, earth.naturalWidth);
+          gl.drawArrays(gl.TRIANGLES, 0, 3);
+        } else {
+          ctx.beginPath(); ctx.arc(c, c, R, 0, 2 * Math.PI); ctx.fillStyle = '#0a2146'; ctx.fill();
+        }
+      } else {
+        // no WebGL: flat ocean with a plain land outline
+        ctx.save();
+        ctx.beginPath(); ctx.arc(c, c, R, 0, 2 * Math.PI); ctx.fillStyle = '#123d78'; ctx.fill(); ctx.clip();
+        ctx.fillStyle = '#4f7f45';
+        for (const poly of land) {
+          const ps = poly.map(([lam, sp, cp]) => proj(lam, sp, cp, 1));
+          if (!ps.some(p => p[2] > 0)) continue;
+          ctx.beginPath();
+          ps.forEach(([x, y, z], i) => {
+            if (z < 0) { const m = Math.hypot(x, y) || 1; x /= m; y /= m; }
+            i ? ctx.lineTo(c + R * x, c - R * y) : ctx.moveTo(c + R * x, c - R * y);
+          });
+          ctx.closePath(); ctx.fill();
+        }
+        ctx.restore();
       }
-      ctx.save();
-      ctx.clip(path);
-      ctx.drawImage(landCv, 0, 0, W, W);
-      ctx.restore();
-      ctx.strokeStyle = 'rgba(0,0,0,0.28)'; ctx.lineWidth = 0.7 * dpr; ctx.stroke(path);
-      ctx.restore();
 
       // routes
       ctx.lineCap = 'round';
@@ -246,7 +242,6 @@
     function frame() {
       if (myRun !== run || !canvas.isConnected) return;
       if (auto) { G.lon += 0.0025; dirty = true; }
-      if (Date.now() - sunAt > 30000) dirty = true; // keep day/night live while idle
       if (Math.abs(vx) > 1e-5 || Math.abs(vy) > 1e-5) {
         G.lon += vx; G.lat = Math.max(-MAX_LAT, Math.min(MAX_LAT, G.lat + vy));
         vx *= 0.94; vy *= 0.94; dirty = true;
@@ -276,8 +271,8 @@
         vx = -dx / radiusCss(); vy = dy / radiusCss();
         G.lon += vx; G.lat = Math.max(-MAX_LAT, Math.min(MAX_LAT, G.lat + vy));
       } else if (ptrs.size === 2) {
-        const g = gap();
-        G.zoom = Math.max(0.7, Math.min(3, G.zoom * g / pinch)); pinch = g;
+        const gp = gap();
+        G.zoom = Math.max(0.7, Math.min(3, G.zoom * gp / pinch)); pinch = gp;
       }
       dirty = true;
     });
