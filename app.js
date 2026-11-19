@@ -206,21 +206,35 @@
           </div></div>` +
         (ac ? `<div class="card"><div class="pl">MOST FLOWN AIRCRAFT</div><div class="pv">${esc(ac[0])}</div><div class="ps">${ac[1]} flight${ac[1] > 1 ? 's' : ''}</div></div>` : '');
     }
-    const modes = ['globe', 'flat'].map(m =>
-      `<button class="chip mode${m === mapMode ? ' on' : ''}" data-mode="${m}">${m === 'globe' ? 'Globe' : 'Flat'}</button>`).join('');
+    window.Satellite.close();
+    const modeNames = { globe: 'Globe', flat: 'Flat', sat: 'Satellite' };
+    const modes = Object.keys(modeNames).map(m =>
+      `<button class="chip mode${m === mapMode ? ' on' : ''}" data-mode="${m}">${modeNames[m]}</button>`).join('');
     const view = mapMode === 'globe'
       ? '<div id="globeWrap"><canvas id="globe" aria-label="Interactive globe of your flights"></canvas></div>'
-      : `<div id="mapWrap"><svg viewBox="0 20 720 280" role="img" aria-label="Map of your flights">
+      : mapMode === 'sat'
+        ? '<div id="globeWrap"></div>'
+        : `<div id="mapWrap"><svg viewBox="0 20 720 280" role="img" aria-label="Map of your flights">
       <path class="land" d="${land}"/>${arcs.join('')}${dots}</svg></div>`;
     $('#tab-map').innerHTML = `<div class="chips">${years.length ? chips : ''}<span class="grow"></span>${modes}</div>` + view + summary +
       (flights.length ? '' : '<div class="empty">Your routes will be drawn here.</div>');
-    if (mapMode === 'globe') {
+    if (mapMode === 'globe' || mapMode === 'sat') {
       const seen = new Set(), routes = [];
       for (const f of list) {
         const a = airports[f.from], b = airports[f.to], k = [f.from, f.to].sort().join('-');
         if (a && b && !seen.has(k)) { seen.add(k); routes.push([a, b]); }
       }
-      window.startGlobe($('#globe'), routes, [...ports].map(c => airports[c]));
+      const pts = [...ports].map(c => airports[c]);
+      const wrap = $('#globeWrap');
+      if (mapMode === 'sat') {
+        window.Satellite.open(wrap, { routes, ports: pts, lock: true });
+      } else {
+        // zooming in far enough swaps the globe for the satellite map (night shading is dropped, as in Flighty)
+        window.startGlobe($('#globe'), routes, pts, v => window.Satellite.open(wrap, {
+          ...v, routes, ports: pts,
+          onExit: e => window.setGlobeView(e.lon, e.lat),
+        }));
+      }
     }
   }
   $('#tab-map').addEventListener('click', e => {
@@ -237,6 +251,7 @@
     tab = name;
     for (const b of document.querySelectorAll('#tabs button')) b.classList.toggle('active', b.dataset.tab === name);
     for (const t of ['flights', 'stats', 'map']) $('#tab-' + t).hidden = t !== name;
+    if (name !== 'map') window.Satellite.close();
     render();
   }
   function render() {

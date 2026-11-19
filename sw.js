@@ -1,5 +1,5 @@
-const CACHE = 'flightlog-v3';
-const FILES = ['./', 'index.html', 'style.css', 'app.js', 'globe.js','manifest.webmanifest', 'icon.svg',
+const CACHE = 'flightlog-v4';
+const FILES = ['./', 'index.html', 'style.css', 'app.js', 'globe.js', 'satellite.js', 'manifest.webmanifest', 'icon.svg',
   'data/airports.js', 'data/airlines.js', 'data/land.js'];
 
 self.addEventListener('install', e => {
@@ -9,7 +9,8 @@ self.addEventListener('activate', e => {
   e.waitUntil(caches.keys().then(ks => Promise.all(ks.filter(k => k !== CACHE).map(k => caches.delete(k)))).then(() => self.clients.claim()));
 });
 self.addEventListener('fetch', e => {
-  if (e.request.method !== 'GET') return;
+  // only cache the app's own files; satellite tiles and the map library come straight from the network
+  if (e.request.method !== 'GET' || new URL(e.request.url).origin !== location.origin) return;
   e.respondWith(
     fetch(e.request).then(r => {
       const copy = r.clone();

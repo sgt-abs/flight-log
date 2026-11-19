@@ -4,7 +4,17 @@
   const RAD = Math.PI / 180;
   const MAX_LAT = 1.4;
   const G = { lon: 0, lat: 0.35, zoom: 1, sig: null };
-  let run = 0;
+  const SWITCH_ZOOM = 1.8; // zooming in past this hands over to the satellite map
+  let run = 0, redraw = null, handing = false, failedAt = 0;
+
+  // called when the satellite map is closed again, to put the globe back where the map was
+  window.setGlobeView = function (lonDeg, latDeg) {
+    G.lon = lonDeg * RAD;
+    G.lat = Math.max(-MAX_LAT, Math.min(MAX_LAT, latDeg * RAD));
+    G.zoom = SWITCH_ZOOM - 0.1;
+    handing = false;
+    if (redraw) redraw();
+  };
 
   // land outline as [lon, sin(lat), cos(lat)] so each frame only needs a few multiplications
   const land = window.LAND.map(poly => poly.map(([lon, lat]) => [lon * RAD, Math.sin(lat * RAD), Math.cos(lat * RAD)]));
@@ -29,7 +39,20 @@
     return pts;
   }
 
-  window.startGlobe = function (canvas, routes, ports) {
+  // sub-solar point (where the sun is overhead) for a moment in time, in radians; accurate to about 1 degree
+  function sunPoint(ms) {
+    const n = ms / 86400000 - 10957.5; // days since J2000
+    const L = (280.46 + 0.9856474 * n) % 360;
+    const g = ((357.528 + 0.9856003 * n) % 360) * RAD;
+    const lam = (L + 1.915 * Math.sin(g) + 0.02 * Math.sin(2 * g)) * RAD;
+    const eps = (23.439 - 4e-7 * n) * RAD;
+    const dec = Math.asin(Math.sin(eps) * Math.sin(lam));
+    const ra = Math.atan2(Math.cos(eps) * Math.sin(lam), Math.cos(lam));
+    const gmst = ((280.46061837 + 360.98564736629 * n) % 360) * RAD;
+    return { lon: ra - gmst, lat: dec };
+  }
+
+  window.startGlobe = function (canvas, routes, ports, onZoomIn) {
     if (!canvas) return;
     const myRun = ++run;
     const ctx = canvas.getContext('2d');
@@ -53,7 +76,39 @@
     const dots = ports.map(p => ({ code: p.iata, lam: p.lon * RAD, sp: Math.sin(p.lat * RAD), cp: Math.cos(p.lat * RAD) }));
     const reduced = window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-    let auto = !reduced, dirty = true, vx = 0, vy = 0;
+    let auto = !reduced, dirty = true, vx = 0, vy = 0, sunAt = 0;
+    redraw = () => { dirty = true; };
+
+    function maybeHandOff() {
+      if (!onZoomIn || handing || G.zoom < SWITCH_ZOOM || Date.now() - failedAt < 10000) return;
+      handing = true;
+      Promise.resolve(onZoomIn({ lon: G.lon / RAD, lat: G.lat / RAD, radius: canvas.clientWidth * 0.46 * G.zoom }))
+        .then(ok => { if (!ok) { handing = false; failedAt = Date.now(); G.zoom = SWITCH_ZOOM - 0.1; dirty = true; } });
+    }
+
+    // night shading is computed on a small offscreen grid and scaled up, which also gives a soft twilight edge
+    const N = 160;
+    const nightCanvas = document.createElement('canvas');
+    nightCanvas.width = nightCanvas.height = N;
+    const nightCtx = nightCanvas.getContext('2d');
+    const nightImg = nightCtx.createImageData(N, N);
+    function drawNight(c, R, proj) {
+      const sun = sunPoint(Date.now());
+      const [sx, sy, sz] = proj(sun.lon, Math.sin(sun.lat), Math.cos(sun.lat), 1);
+      const W = canvas.width, px = nightImg.data;
+      for (let j = 0; j < N; j++) {
+        const y = (c - (j + 0.5) / N * W) / R;
+        for (let i = 0; i < N; i++) {
+          const x = ((i + 0.5) / N * W - c) / R, r2 = x * x + y * y, o = (j * N + i) * 4;
+          if (r2 >= 1) { px[o + 3] = 0; continue; }
+          const k = Math.max(0, Math.min(1, (0.06 - (x * sx + y * sy + Math.sqrt(1 - r2) * sz)) / 0.2));
+          px[o] = 4; px[o + 1] = 10; px[o + 2] = 28; px[o + 3] = k * k * (3 - 2 * k) * 150;
+        }
+      }
+      nightCtx.putImageData(nightImg, 0, 0);
+      ctx.drawImage(nightCanvas, 0, 0, W, W);
+      sunAt = Date.now();
+    }
 
     function draw() {
       const W = canvas.width, c = W / 2, R = W * 0.46 * G.zoom;
@@ -84,6 +139,7 @@
         });
         ctx.closePath(); ctx.fill(); ctx.stroke();
       }
+      drawNight(c, R, proj);
       ctx.restore();
 
       // routes
@@ -121,6 +177,7 @@
     function frame() {
       if (myRun !== run || !canvas.isConnected) return;
       if (auto) { G.lon += 0.0025; dirty = true; }
+      if (Date.now() - sunAt > 30000) dirty = true; // keep day/night live while idle
       if (Math.abs(vx) > 1e-5 || Math.abs(vy) > 1e-5) {
         G.lon += vx; G.lat = Math.max(-MAX_LAT, Math.min(MAX_LAT, G.lat + vy));
         vx *= 0.94; vy *= 0.94; dirty = true;
@@ -152,6 +209,7 @@
       } else if (ptrs.size === 2) {
         const g = gap();
         G.zoom = Math.max(0.7, Math.min(3, G.zoom * g / pinch)); pinch = g;
+        maybeHandOff();
       }
       dirty = true;
     });
@@ -160,8 +218,10 @@
     canvas.addEventListener('pointercancel', end);
     canvas.addEventListener('wheel', e => {
       e.preventDefault();
+      auto = false;
       G.zoom = Math.max(0.7, Math.min(3, G.zoom * Math.exp(-e.deltaY * 0.0015)));
       dirty = true;
+      maybeHandOff();
     }, { passive: false });
 
     frame();
