@@ -3,18 +3,9 @@
 
   const RAD = Math.PI / 180;
   const MAX_LAT = 1.4;
+  const ARC = '#ffd24a';
   const G = { lon: 0, lat: 0.35, zoom: 1, sig: null };
-  const SWITCH_ZOOM = 1.8; // zooming in past this hands over to the satellite map
-  let run = 0, redraw = null, handing = false, failedAt = 0;
-
-  // called when the satellite map is closed again, to put the globe back where the map was
-  window.setGlobeView = function (lonDeg, latDeg) {
-    G.lon = lonDeg * RAD;
-    G.lat = Math.max(-MAX_LAT, Math.min(MAX_LAT, latDeg * RAD));
-    G.zoom = SWITCH_ZOOM - 0.1;
-    handing = false;
-    if (redraw) redraw();
-  };
+  let run = 0;
 
   // land outline as [lon, sin(lat), cos(lat)] so each frame only needs a few multiplications
   const land = window.LAND.map(poly => poly.map(([lon, lat]) => [lon * RAD, Math.sin(lat * RAD), Math.cos(lat * RAD)]));
@@ -52,7 +43,62 @@
     return { lon: ra - gmst, lat: dec };
   }
 
-  window.startGlobe = function (canvas, routes, ports, onZoomIn) {
+  // ---------- land colouring ----------
+  // No land-cover data is bundled, so colour comes from latitude bands plus a handful of hand-placed regions
+  const COLORS = {
+    desert: [206, 178, 122], steppe: [170, 160, 100], rain: [22, 84, 40],
+    mount: [128, 112, 92], ice: [242, 246, 250],
+  };
+  const STRENGTH = { desert: 1, steppe: 0.5, rain: 1, mount: 0.55, ice: 1 };
+  // [centre lon, centre lat, half-width lon, half-height lat, kind]
+  const REGIONS = [
+    [10, 24, 28, 9, 'desert'], [47, 24, 12, 8, 'desert'], [103, 43, 14, 6, 'desert'], [134, -25, 14, 9, 'desert'],
+    [-111, 33, 9, 6, 'desert'], [20, -24, 9, 7, 'desert'], [62, 40, 10, 6, 'desert'], [71, 27, 5, 4, 'desert'],
+    [58, 31, 8, 5, 'desert'], [-68, -45, 5, 9, 'steppe'], [-100, 42, 12, 6, 'steppe'], [60, 52, 25, 5, 'steppe'],
+    [-62, -4, 14, 9, 'rain'], [22, 0, 10, 7, 'rain'], [108, -1, 14, 7, 'rain'], [102, 17, 7, 8, 'rain'],
+    [88, 32, 14, 5, 'mount'], [-70, -20, 4, 20, 'mount'], [-110, 45, 6, 12, 'mount'],
+    [-40, 73, 22, 12, 'ice'],
+  ];
+  const lerp = (a, b, t) => a + (b - a) * t;
+  const smooth = (a, b, x) => { const t = Math.max(0, Math.min(1, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
+  const hash = (x, y) => { const s = Math.sin(x * 127.1 + y * 311.7) * 43758.5453; return s - Math.floor(s); };
+  function noise(x, y) {
+    const xi = Math.floor(x), yi = Math.floor(y), u = smooth(0, 1, x - xi), v = smooth(0, 1, y - yi);
+    return lerp(lerp(hash(xi, yi), hash(xi + 1, yi), u), lerp(hash(xi, yi + 1), hash(xi + 1, yi + 1), u), v);
+  }
+  // base colour by latitude (degrees, signed)
+  const BANDS = [
+    [0, [40, 110, 52]], [12, [84, 126, 60]], [30, [92, 126, 68]], [45, [66, 100, 58]],
+    [58, [58, 84, 66]], [68, [132, 142, 124]], [76, [240, 244, 248]],
+  ];
+  function bandColor(alat) {
+    for (let i = 1; i < BANDS.length; i++) {
+      if (alat <= BANDS[i][0]) {
+        const t = (alat - BANDS[i - 1][0]) / (BANDS[i][0] - BANDS[i - 1][0]);
+        const a = BANDS[i - 1][1], b = BANDS[i][1];
+        return [lerp(a[0], b[0], t), lerp(a[1], b[1], t), lerp(a[2], b[2], t)];
+      }
+    }
+    return BANDS[BANDS.length - 1][1];
+  }
+  const landRGB = [0, 0, 0];
+  function landColor(lonD, latD) {
+    let c = latD < -64 ? COLORS.ice : bandColor(Math.abs(latD));
+    let r = c[0], g = c[1], b = c[2];
+    for (const [lc, la, rx, ry, kind] of REGIONS) {
+      const dl = ((lonD - lc + 540) % 360) - 180, dy = latD - la;
+      // wobble the edge with noise so regions look like patches of terrain rather than ovals
+      const d2 = (dl / rx) * (dl / rx) + (dy / ry) * (dy / ry) + (noise(lonD / 4 + lc, latD / 4 + la) - 0.5) * 0.9;
+      if (d2 >= 1) continue;
+      const w = smooth(0, 0.7, 1 - d2) * STRENGTH[kind], k = COLORS[kind];
+      r = lerp(r, k[0], w); g = lerp(g, k[1], w); b = lerp(b, k[2], w);
+    }
+    const n = 0.86 + 0.28 * (0.65 * noise(lonD / 7, latD / 7) + 0.35 * noise(lonD / 2.5, latD / 2.5));
+    landRGB[0] = r * n; landRGB[1] = g * n; landRGB[2] = b * n;
+    return landRGB;
+  }
+
+  window.startGlobe = function (canvas, routes, ports) {
     if (!canvas) return;
     const myRun = ++run;
     const ctx = canvas.getContext('2d');
@@ -77,36 +123,47 @@
     const reduced = window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches;
 
     let auto = !reduced, dirty = true, vx = 0, vy = 0, sunAt = 0;
-    redraw = () => { dirty = true; };
 
-    function maybeHandOff() {
-      if (!onZoomIn || handing || G.zoom < SWITCH_ZOOM || Date.now() - failedAt < 10000) return;
-      handing = true;
-      Promise.resolve(onZoomIn({ lon: G.lon / RAD, lat: G.lat / RAD, radius: canvas.clientWidth * 0.46 * G.zoom }))
-        .then(ok => { if (!ok) { handing = false; failedAt = Date.now(); G.zoom = SWITCH_ZOOM - 0.1; dirty = true; } });
-    }
+    // The coloured surface (ocean, land, sun lighting, night side) is computed on a small grid and scaled up,
+    // which keeps it smooth and fast; land edges stay crisp because the land is drawn as a vector clip.
+    const N = 220;
+    const mk = () => { const cv = document.createElement('canvas'); cv.width = cv.height = N; return cv; };
+    const oceanCv = mk(), landCv = mk();
+    const oceanCtx = oceanCv.getContext('2d'), landCtx = landCv.getContext('2d');
+    const oceanImg = oceanCtx.createImageData(N, N), landImg = landCtx.createImageData(N, N);
 
-    // night shading is computed on a small offscreen grid and scaled up, which also gives a soft twilight edge
-    const N = 160;
-    const nightCanvas = document.createElement('canvas');
-    nightCanvas.width = nightCanvas.height = N;
-    const nightCtx = nightCanvas.getContext('2d');
-    const nightImg = nightCtx.createImageData(N, N);
-    function drawNight(c, R, proj) {
+    function paintSurface(c, R, proj) {
       const sun = sunPoint(Date.now());
       const [sx, sy, sz] = proj(sun.lon, Math.sin(sun.lat), Math.cos(sun.lat), 1);
-      const W = canvas.width, px = nightImg.data;
+      const hm = Math.hypot(sx, sy, sz + 1), hx = sx / hm, hy = sy / hm, hz = (sz + 1) / hm; // half-vector for the sun glint
+      const sinL = Math.sin(G.lat), cosL = Math.cos(G.lat);
+      const W = canvas.width, od = oceanImg.data, ld = landImg.data;
       for (let j = 0; j < N; j++) {
         const y = (c - (j + 0.5) / N * W) / R;
         for (let i = 0; i < N; i++) {
           const x = ((i + 0.5) / N * W - c) / R, r2 = x * x + y * y, o = (j * N + i) * 4;
-          if (r2 >= 1) { px[o + 3] = 0; continue; }
-          const k = Math.max(0, Math.min(1, (0.06 - (x * sx + y * sy + Math.sqrt(1 - r2) * sz)) / 0.2));
-          px[o] = 4; px[o + 1] = 10; px[o + 2] = 28; px[o + 3] = k * k * (3 - 2 * k) * 150;
+          if (r2 >= 1) { od[o + 3] = 0; ld[o + 3] = 0; continue; }
+          const z = Math.sqrt(1 - r2);
+          const latD = Math.asin(Math.max(-1, Math.min(1, y * cosL + z * sinL))) / RAD;
+          const lonD = (G.lon + Math.atan2(x, z * cosL - y * sinL)) / RAD;
+
+          const d = x * sx + y * sy + z * sz;                           // cosine of the sun's angle from overhead
+          const day = smooth(-0.1, 0.25, d);
+          const lit = (0.24 + 0.76 * day * (0.6 + 0.4 * Math.max(d, 0))) * (0.7 + 0.3 * z);
+          const tw = Math.exp(-(((d - 0.03) / 0.08) ** 2)) * 0.5;         // warm glow along the terminator
+          const spec = day > 0 ? Math.pow(Math.max(0, x * hx + y * hy + z * hz), 160) * 0.35 * day : 0;
+
+          const cl = Math.cos(latD * RAD), t = cl * cl;
+          const L = landColor(lonD, latD);
+          ld[o] = L[0] * lit + tw * 70; ld[o + 1] = L[1] * lit + tw * 30; ld[o + 2] = L[2] * lit; ld[o + 3] = 255;
+          od[o] = lerp(10, 18, t) * lit + tw * 50 + spec * 255;
+          od[o + 1] = lerp(38, 72, t) * lit + tw * 22 + spec * 255;
+          od[o + 2] = lerp(86, 132, t) * lit + spec * 255;
+          od[o + 3] = 255;
         }
       }
-      nightCtx.putImageData(nightImg, 0, 0);
-      ctx.drawImage(nightCanvas, 0, 0, W, W);
+      oceanCtx.putImageData(oceanImg, 0, 0);
+      landCtx.putImageData(landImg, 0, 0);
       sunAt = Date.now();
     }
 
@@ -119,57 +176,69 @@
       };
       ctx.clearRect(0, 0, W, W);
 
-      // ocean
-      ctx.beginPath(); ctx.arc(c, c, R, 0, 2 * Math.PI);
-      ctx.fillStyle = col('--water'); ctx.fill();
-      ctx.lineWidth = dpr; ctx.strokeStyle = col('--line'); ctx.stroke();
+      // atmosphere glow
+      const halo = ctx.createRadialGradient(c, c, R * 0.97, c, c, R * 1.13);
+      halo.addColorStop(0, 'rgba(110,170,255,0.5)'); halo.addColorStop(1, 'rgba(110,170,255,0)');
+      ctx.fillStyle = halo; ctx.beginPath(); ctx.arc(c, c, R * 1.13, 0, 2 * Math.PI); ctx.fill();
 
-      // land, clipped to the globe; points behind the horizon are pushed onto the rim
+      paintSurface(c, R, proj);
       ctx.save();
       ctx.beginPath(); ctx.arc(c, c, R, 0, 2 * Math.PI); ctx.clip();
-      ctx.fillStyle = col('--land'); ctx.strokeStyle = col('--line'); ctx.lineWidth = 0.5 * dpr;
+      ctx.fillStyle = '#0a2146'; ctx.fillRect(0, 0, W, W); // solid base so the low-res edge pixels never show through
+      ctx.drawImage(oceanCv, 0, 0, W, W);
+
+      // land: one path of every visible polygon (points behind the horizon are pushed onto the rim),
+      // filled with the coloured land layer
+      const path = new Path2D();
       for (const poly of land) {
         const ps = poly.map(([lam, sp, cp]) => proj(lam, sp, cp, 1));
         if (!ps.some(p => p[2] > 0)) continue;
-        ctx.beginPath();
         ps.forEach(([x, y, z], i) => {
           if (z < 0) { const m = Math.hypot(x, y) || 1; x /= m; y /= m; }
           const px = c + R * x, py = c - R * y;
-          i ? ctx.lineTo(px, py) : ctx.moveTo(px, py);
+          i ? path.lineTo(px, py) : path.moveTo(px, py);
         });
-        ctx.closePath(); ctx.fill(); ctx.stroke();
+        path.closePath();
       }
-      drawNight(c, R, proj);
+      ctx.save();
+      ctx.clip(path);
+      ctx.drawImage(landCv, 0, 0, W, W);
+      ctx.restore();
+      ctx.strokeStyle = 'rgba(0,0,0,0.28)'; ctx.lineWidth = 0.7 * dpr; ctx.stroke(path);
       ctx.restore();
 
       // routes
-      ctx.strokeStyle = col('--accent'); ctx.lineWidth = 1.6 * dpr; ctx.lineCap = 'round';
-      for (const pts of arcs) {
-        ctx.beginPath();
-        let pen = false;
-        for (const [lam, sp, cp, r] of pts) {
-          const [x, y, z] = proj(lam, sp, cp, r);
-          if (z > 0 || x * x + y * y > 1) {
-            const px = c + R * x, py = c - R * y;
-            pen ? ctx.lineTo(px, py) : ctx.moveTo(px, py); pen = true;
-          } else pen = false;
+      ctx.lineCap = 'round';
+      for (const pass of [0, 1]) {
+        ctx.strokeStyle = pass ? ARC : 'rgba(4,12,30,0.55)';
+        ctx.lineWidth = (pass ? 1.8 : 3.6) * dpr;
+        for (const pts of arcs) {
+          ctx.beginPath();
+          let pen = false;
+          for (const [lam, sp, cp, r] of pts) {
+            const [x, y, z] = proj(lam, sp, cp, r);
+            if (z > 0 || x * x + y * y > 1) {
+              const px = c + R * x, py = c - R * y;
+              pen ? ctx.lineTo(px, py) : ctx.moveTo(px, py); pen = true;
+            } else pen = false;
+          }
+          ctx.stroke();
         }
-        ctx.stroke();
       }
 
       // airports
       const labels = dots.length <= 24 || G.zoom > 1.4;
-      ctx.font = `600 ${11 * dpr}px sans-serif`;
+      ctx.font = `700 ${11 * dpr}px sans-serif`;
       for (const d of dots) {
         const [x, y, z] = proj(d.lam, d.sp, d.cp, 1);
         if (z < 0.05) continue;
         const px = c + R * x, py = c - R * y;
-        ctx.beginPath(); ctx.arc(px, py, 3.2 * dpr, 0, 2 * Math.PI);
-        ctx.fillStyle = col('--accent'); ctx.fill();
-        ctx.strokeStyle = col('--card'); ctx.lineWidth = dpr; ctx.stroke();
+        ctx.beginPath(); ctx.arc(px, py, 3.4 * dpr, 0, 2 * Math.PI);
+        ctx.fillStyle = ARC; ctx.fill();
+        ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.2 * dpr; ctx.stroke();
         if (labels) {
-          ctx.lineWidth = 3 * dpr; ctx.strokeStyle = col('--water'); ctx.strokeText(d.code, px + 6 * dpr, py - 5 * dpr);
-          ctx.fillStyle = col('--text'); ctx.fillText(d.code, px + 6 * dpr, py - 5 * dpr);
+          ctx.lineWidth = 3 * dpr; ctx.strokeStyle = 'rgba(4,12,30,0.85)'; ctx.strokeText(d.code, px + 6 * dpr, py - 5 * dpr);
+          ctx.fillStyle = '#fff'; ctx.fillText(d.code, px + 6 * dpr, py - 5 * dpr);
         }
       }
     }
@@ -209,7 +278,6 @@
       } else if (ptrs.size === 2) {
         const g = gap();
         G.zoom = Math.max(0.7, Math.min(3, G.zoom * g / pinch)); pinch = g;
-        maybeHandOff();
       }
       dirty = true;
     });
@@ -221,7 +289,6 @@
       auto = false;
       G.zoom = Math.max(0.7, Math.min(3, G.zoom * Math.exp(-e.deltaY * 0.0015)));
       dirty = true;
-      maybeHandOff();
     }, { passive: false });
 
     frame();
